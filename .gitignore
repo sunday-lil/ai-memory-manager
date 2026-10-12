@@ -1,0 +1,16 @@
+# 用户私人对话数据（严禁上传）
+conversations/
+trash/
+library.json
+*.json
+!package.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# 系统
+Thumbs.db
+.DS_Store
