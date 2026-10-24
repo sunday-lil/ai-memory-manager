@@ -5,6 +5,12 @@ library.json
 *.json
 !package.json
 
+# 自动备份 / 损坏副本 / 原子写入残留
+*.bak
+*.corrupt-*
+.tmp-*
+.bak-*
+
 # Python
 __pycache__/
 *.pyc
