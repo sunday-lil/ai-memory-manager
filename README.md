@@ -37,6 +37,7 @@ python memory_manager.py
 - 重命名只影响显示标题，不改原始文件
 - 删除移入 `trash/` 回收站，**可还原**星标、标签和标题；也可彻底删除或清空
 - 导入文件夹时递归扫描子目录；按内容 SHA-1 去重，不会重复产生 `_1` 副本
+- 支持 DeepSeek 新版聊天备份 v3：按 session + 首个用户请求自动分对话，合并重试与重新生成分支，保真还原思考耗时、搜索引用和附件名
 
 ### 导出
 
@@ -73,6 +74,26 @@ pythonw memory_manager.py
 
 首次启动时，如果当前目录有对话 JSON，会自动导入；之后导入的文件会复制到 `conversations/` 统一管理，原文件不动。
 
+### DeepSeek 新版聊天备份（v3）
+
+新版备份目录通常长这样：
+
+```text
+聊天备份/
+├── manifest.json                 {"export_format_version": 3}
+├── chat_session_index.json       每个 session 的 id / 标题 / 消息数
+├── chat_sessions/<uuid>.json     每个 session 的完整消息树
+└── chat_sessions/<uuid>_files/   图片、附件（本程序不复制，只保留文件名引用）
+```
+
+- 图形界面：`导入 → 导入文件夹`，直接选 `聊天备份/` 即可；程序会自动识别 v3 格式。
+- 命令行：`python memory_manager.py --import .\聊天备份`
+- 自动分对话：先按 session 分组，再比较首个用户请求；同一请求的重试 root 合并，不同请求拆成多条对话。每条对话选消息量最大的 root，再取其中最长的一条分支，还原成线性问答；index 标题优先给主对话，其余对话从首条请求提取标题。
+- 保留内容：用户提问、AI 回答、思考过程与耗时、搜索引用、附件文件名；`CONTENT_RISK`、`TIP` 这类界面提示会被忽略。
+- 标题优先使用备份里的 session 标题；标题为空时从首条用户请求自动提取。
+- `user.json` 里的邮箱、手机号等账号信息**不会**被读取，也不会导入。
+- 单个 `chat_sessions/<uuid>.json` 也可以直接在「导入文件」里多选导入。
+
 ## 命令行
 
 不带参数启动图形界面；带参数则作为命令行工具使用，便于备份、检索和脚本化。
@@ -95,8 +116,9 @@ python memory_manager.py --export-md 记忆存档.md
 python memory_manager.py --export-html 记忆存档.html
 python memory_manager.py --export-html 精选.html --only 赛博 --only 危机
 
-# 导入文件或整个文件夹（递归）
+# 导入文件、普通文件夹，或 DeepSeek v3 聊天备份
 python memory_manager.py --import .\导出文件
+python memory_manager.py --import .\聊天备份
 ```
 
 `--check` 发现错误时返回退出码 1，方便放进备份脚本；警告不影响退出码。
@@ -166,10 +188,11 @@ python memory_manager.py --import .\导出文件
 ## 项目结构
 
 ```text
-memory_core.py     数据核心：库、回收站、同步、搜索、统计、Markdown/HTML 导出（无 GUI 依赖）
-memory_gui.py      tkinter 界面：列表、详情、搜索窗口、回收站、统计、主题
-memory_manager.py  入口：默认启动 GUI，也提供命令行
-tests/             单元测试与 GUI 冒烟测试
+memory_core.py         数据核心：库、回收站、同步、搜索、统计、Markdown/HTML 导出（无 GUI 依赖）
+memory_backup_v3.py    DeepSeek v3 聊天备份解析：消息树 -> 自动分对话 -> 旧版 conversation
+memory_gui.py          tkinter 界面：列表、详情、搜索窗口、回收站、统计、主题
+memory_manager.py      入口：默认启动 GUI，也提供命令行
+tests/                 单元测试与 GUI 冒烟测试
 ```
 
 ```bash
@@ -178,6 +201,7 @@ python -m unittest discover -s tests -v
 
 ## 版本
 
+- **v1.2.0**：支持 DeepSeek 新版聊天备份 v3；按 session + 首个用户请求自动分对话，合并重试 root/重新生成分支，还原提问、回答、思考耗时、引用与附件名；文件夹导入自动识别，单个 session 文件也可导入
 - **v1.1.1**：文件缺失时保留元数据（`library.json` 的 `missing` 段），放回文件或重新导入后自动接回；窗口位置自动限制在当前屏幕内，换显示器不会跑到屏幕外；统计/体检/命令行显示缺失数量
 - **v1.1.0**：全文搜索重做（角色/范围/正则/实时）、回收站可视化还原、单文件 HTML 导出、命令行工具、原子写入与自动备份、导入去重、库体检、问答筛选、夜间模式、字号缩放、窗口状态记忆、修复列表滚动条被挤成小条的问题
 - **v1.0.0**：导入、浏览、搜索、标签、星标、合并导出、Markdown 导出、统计

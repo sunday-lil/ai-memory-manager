@@ -19,6 +19,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import memory_core as core
+import memory_backup_v3 as backup_v3
 
 APP_TITLE = "AI 记忆储存和管理器"
 
@@ -1895,8 +1896,12 @@ class App(tk.Tk):
 
     def import_folder(self) -> None:
         folder = filedialog.askdirectory(
-            parent=self, title="选择包含对话 JSON 的文件夹（会扫描子目录）")
+            parent=self, title="选择对话 JSON 文件夹或 DeepSeek 聊天备份")
         if not folder:
+            return
+        backup_root = backup_v3.detect_v3_backup(folder)
+        if backup_root:
+            self._do_import_v3(backup_root)
             return
         paths = []
         for dirpath, dirnames, filenames in os.walk(folder):
@@ -1909,14 +1914,58 @@ class App(tk.Tk):
             return
         self._do_import(paths)
 
+    def _do_import_v3(self, backup_root: str) -> None:
+        try:
+            converted = backup_v3.convert_backup(backup_root)
+        except (backup_v3.BackupFormatError, OSError, ValueError) as exc:
+            messagebox.showerror("导入失败", f"无法解析聊天备份：\n{exc}", parent=self)
+            return
+        if not converted:
+            messagebox.showinfo("导入", "备份里没有找到可导入的对话。", parent=self)
+            return
+        result = self.lib.import_conversations(
+            [(item.filename, item.data) for item in converted])
+        self.conv_cache.clear()
+        self.refresh_list()
+        opening = result.added or result.restored
+        if opening:
+            self.show_conv(opening[0])
+        lines = [
+            f"识别到 {len(converted)} 个对话（按 session 和首个请求自动拆分，已合并重试分支）。",
+            f"新增 {len(result.added)} 个，接回 {len(result.restored)} 个。",
+        ]
+        if result.duplicates:
+            lines.append(f"跳过重复 {len(result.duplicates)} 个。")
+        if result.skipped:
+            lines.append(f"跳过 {len(result.skipped)} 个文件。")
+        messagebox.showinfo("导入 DeepSeek 备份", "\n".join(lines), parent=self)
+        self.update_status(f"DeepSeek 备份导入：{len(result.added)} 个新对话")
+
     def _do_import(self, paths: Sequence[str]) -> None:
-        result = self.lib.import_paths(paths)
+        # 允许直接多选 chat_sessions/<id>.json（新版备份的单个会话文件）。
+        converted = []
+        regular = []
+        for path in paths:
+            if os.path.basename(os.path.dirname(path)) == "chat_sessions":
+                items = backup_v3.convert_session_file_all(path)
+                if items:
+                    converted.extend(items)
+                    continue
+            regular.append(path)
+        result = core.ImportResult()
+        if converted:
+            result.extend(self.lib.import_conversations(
+                [(item.filename, item.data) for item in converted]))
+        if regular:
+            result.extend(self.lib.import_paths(regular))
         self.conv_cache.clear()
         self.refresh_list()
         opening = result.added or result.restored
         if opening:
             self.show_conv(opening[0])
         lines = [f"新增 {len(result.added)} 个对话。"]
+        if converted:
+            lines.append(f"其中 {len(converted)} 个来自 DeepSeek 新版备份的文件。")
         if result.restored:
             lines.append(f"接回 {len(result.restored)} 个此前文件缺失的对话"
                          "（标题/标签/星标已恢复）。")

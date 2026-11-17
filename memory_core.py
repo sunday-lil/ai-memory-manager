@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIRNAME = "conversations"
@@ -781,6 +781,13 @@ class ImportResult:
     def total(self) -> int:
         return len(self.added) + len(self.restored) + len(self.duplicates) + len(self.skipped)
 
+    def extend(self, other: "ImportResult") -> "ImportResult":
+        self.added.extend(other.added)
+        self.restored.extend(other.restored)
+        self.duplicates.extend(other.duplicates)
+        self.skipped.extend(other.skipped)
+        return self
+
 
 # ---------------------------------------------------------------------------
 # 对话库
@@ -1162,6 +1169,70 @@ class Library:
             if digest:
                 hash_index[digest] = fname
             result.added.append(fname)
+        if result.added or result.restored:
+            self.save()
+        return result
+
+    @staticmethod
+    def _safe_import_filename(filename: str) -> str:
+        name = os.path.basename(str(filename or "conversation.json"))
+        name = re.sub(r'[\\/:*?"<>|]+', "_", name).strip(" .")
+        if not name.lower().endswith(".json"):
+            name += ".json"
+        return name or "conversation.json"
+
+    def import_conversations(
+        self,
+        conversations: Iterable[Tuple[str, Dict[str, Any]]],
+    ) -> ImportResult:
+        """导入内存中生成好的 conversation 数据（用于新版备份拆分）。
+
+        `conversations` 的每一项是 (文件名, 对话字典)。内容按序列化后的
+        SHA-1 去重；如果命中 missing 元数据，会接回原来的标签/星标。
+        """
+        result = ImportResult()
+        hash_index = {
+            meta.get("sha1"): fname
+            for fname, meta in self.convs.items()
+            if meta.get("sha1")
+        }
+        missing_index = {
+            meta.get("sha1"): fname
+            for fname, meta in self.missing.items()
+            if meta.get("sha1")
+        }
+        for filename, data in conversations:
+            if not is_conversation(data):
+                result.skipped.append((str(filename), "不是有效的对话数据"))
+                continue
+            text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+            digest = hashlib.sha1(text.encode("utf-8")).hexdigest()
+            if digest and digest in hash_index:
+                result.duplicates.append(
+                    (str(filename), self.convs[hash_index[digest]]["title"]))
+                continue
+            base = self._safe_import_filename(filename)
+            dst = unique_path(self.dir, base)
+            try:
+                atomic_write_text(dst, text)
+            except OSError as exc:
+                result.skipped.append((str(filename), f"写入失败：{exc}"))
+                continue
+            fname = os.path.basename(dst)
+            meta = None
+            if digest and digest in missing_index:
+                meta = self.missing.pop(missing_index[digest], None)
+            if isinstance(meta, dict):
+                self._sanitize_meta(meta, fname)
+                self._refresh_meta(meta, fname, data, dst)
+                result.restored.append(fname)
+            else:
+                meta = self._make_meta(fname, data, dst, digest=digest)
+                result.added.append(fname)
+            self.convs[fname] = meta
+            self.missing.pop(fname, None)
+            if digest:
+                hash_index[digest] = fname
         if result.added or result.restored:
             self.save()
         return result

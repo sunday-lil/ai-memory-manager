@@ -137,6 +137,25 @@ class GuiSmokeTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_import_v3_backup_folder(self):
+        try:
+            from tests.test_backup_v3 import make_backup
+        except ImportError:
+            from test_backup_v3 import make_backup
+        backup = os.path.join(self.root, "聊天备份")
+        make_backup(backup)
+        original = self.gui.messagebox.showinfo
+        self.gui.messagebox.showinfo = lambda *args, **kwargs: None
+        try:
+            self.app._do_import_v3(backup)
+        finally:
+            self.gui.messagebox.showinfo = original
+        titles = {meta["title"] for meta in self.app.lib.convs.values()}
+        self.assertIn("第一段", titles)
+        self.assertIn("标题测试", titles)
+        self.assertIn("另一个完全不同的话题", titles)
+        self.assertEqual(len(self.app.lib.convs), 4)  # 原有 1 个 + 备份 3 个
+
 
 if __name__ == "__main__":
     unittest.main()

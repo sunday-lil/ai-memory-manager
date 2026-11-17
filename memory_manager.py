@@ -29,6 +29,7 @@ from typing import Any, List, Optional, Sequence
 from memory_core import (
     VERSION,
     DataError,
+    ImportResult,
     Library,
     atomic_write_text,
     conversation_title,
@@ -38,6 +39,7 @@ from memory_core import (
     to_markdown,
     validate_library,
 )
+import memory_backup_v3 as backup_v3
 
 
 # ---------------------------------------------------------------------------
@@ -285,27 +287,68 @@ def cmd_export_html(args, lib: Library) -> int:
 
 def cmd_import(args, lib: Library) -> int:
     paths: List[str] = []
+    generated = []
+    backup_conversations = 0
     for raw in args.import_paths:
         path = os.path.abspath(raw)
         if os.path.isdir(path):
+            backup_root = backup_v3.detect_v3_backup(path)
+            if backup_root:
+                try:
+                    converted = backup_v3.convert_backup(backup_root)
+                except (backup_v3.BackupFormatError, OSError, ValueError) as exc:
+                    print(f"无法解析聊天备份 {backup_root}：{exc}", file=sys.stderr)
+                    return 2
+                generated.extend(converted)
+                backup_conversations += len(converted)
+                continue
             for dirpath, dirnames, filenames in os.walk(path):
                 dirnames[:] = [d for d in dirnames if not d.startswith(".")]
                 paths.extend(os.path.join(dirpath, f) for f in filenames
                              if f.lower().endswith(".json"))
         else:
+            if os.path.basename(os.path.dirname(path)) == "chat_sessions":
+                items = backup_v3.convert_session_file_all(path)
+                if items:
+                    generated.extend(items)
+                    backup_conversations += len(items)
+                    continue
             paths.append(path)
-    if not paths:
-        print("没有找到 JSON 文件。", file=sys.stderr)
+
+    # 用户直接选中 chat_sessions/ 目录时，逐个会话文件转换。
+    regular_paths: List[str] = []
+    for path in paths:
+        if os.path.basename(os.path.dirname(path)) == "chat_sessions":
+            items = backup_v3.convert_session_file_all(path)
+            if items:
+                generated.extend(items)
+                backup_conversations += len(items)
+                continue
+        regular_paths.append(path)
+    paths = regular_paths
+    if not paths and not generated:
+        print("没有找到 JSON 文件或聊天备份。", file=sys.stderr)
         return 2
-    result = lib.import_paths(paths)
+
+    result = ImportResult()
+    if generated:
+        result.extend(lib.import_conversations(
+            [(item.filename, item.data) for item in generated]))
+    if paths:
+        result.extend(lib.import_paths(paths))
+
     if args.json:
         _print_json({
+            "backup_v3_conversations": backup_conversations,
             "added": result.added,
             "restored": result.restored,
             "duplicates": result.duplicates,
             "skipped": result.skipped,
         })
         return 0
+    if backup_conversations:
+        print(f"识别 DeepSeek v3 备份：{backup_conversations} 个对话"
+              "（按 session 和首个请求自动拆分，已合并重试分支）。")
     print(f"新增 {len(result.added)} 个对话。")
     if result.restored:
         print(f"接回 {len(result.restored)} 个此前文件缺失的对话"
@@ -344,7 +387,8 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--export-md", metavar="文件", help="导出 Markdown")
     group.add_argument("--export-html", metavar="文件", help="导出单文件 HTML")
     group.add_argument("--import", dest="import_paths", action="append",
-                       metavar="路径", help="导入 JSON 文件或文件夹（可重复）")
+                       metavar="路径",
+                       help="导入 JSON 文件、文件夹或 DeepSeek v3 聊天备份（可重复）")
     group.add_argument("--gui", action="store_true", help="启动图形界面")
 
     parser.add_argument("--role", action="append",

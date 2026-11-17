@@ -1,6 +1,7 @@
 # 用户私人对话数据（严禁上传）
 conversations/
 trash/
+聊天备份/
 library.json
 *.json
 !package.json
