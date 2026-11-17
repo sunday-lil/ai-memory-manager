@@ -145,6 +145,62 @@ class TempLibraryTest(unittest.TestCase):
         saved = core.load_json(legacy.file)["conversations"]["old.json"]
         self.assertNotIn("_legacy_meta", saved)
 
+    def test_missing_file_metadata_preserved_and_restored(self):
+        fname = self.add_conversation(count=2)
+        meta = self.lib.convs[fname]
+        meta["tags"] = ["重要"]
+        meta["starred"] = True
+        meta["title"] = "自定义标题"
+        meta["title_custom"] = True
+        self.lib.save()
+
+        path = self.lib.path(fname)
+        keep = os.path.join(self.root, "keep.json")
+        shutil.copy2(path, keep)
+        os.remove(path)
+
+        self.assertTrue(self.lib.sync())
+        self.assertNotIn(fname, self.lib.convs)
+        self.assertIn(fname, self.lib.missing)
+        saved = core.load_json(self.lib.file)
+        self.assertIn("missing", saved)
+        self.assertIn(fname, saved["missing"])
+
+        report = core.validate_library(self.lib)
+        self.assertTrue(any("缺失" in issue["message"] for issue in report["issues"]))
+
+        shutil.copy2(keep, path)
+        os.remove(keep)
+        self.assertTrue(self.lib.sync())
+        self.assertIn(fname, self.lib.convs)
+        self.assertNotIn(fname, self.lib.missing)
+        restored = self.lib.convs[fname]
+        self.assertEqual(restored["tags"], ["重要"])
+        self.assertTrue(restored["starred"])
+        self.assertEqual(restored["title"], "自定义标题")
+
+    def test_import_restores_missing_metadata(self):
+        fname = self.add_conversation(count=1)
+        self.lib.convs[fname]["tags"] = ["保留"]
+        self.lib.convs[fname]["starred"] = True
+        self.lib.save()
+
+        path = self.lib.path(fname)
+        keep = os.path.join(self.root, "missing-source.json")
+        shutil.copy2(path, keep)
+        os.remove(path)
+        self.lib.sync()
+        self.assertIn(fname, self.lib.missing)
+
+        result = self.lib.import_paths([keep])
+        self.assertEqual(result.added, [])
+        self.assertEqual(len(result.restored), 1)
+        new_name = result.restored[0]
+        self.assertIn(new_name, self.lib.convs)
+        self.assertEqual(self.lib.convs[new_name]["tags"], ["保留"])
+        self.assertTrue(self.lib.convs[new_name]["starred"])
+        self.assertEqual(self.lib.missing, {})
+
     def test_atomic_backup_recovery(self):
         fname = self.add_conversation()
         self.lib.save()  # 生成一份有效备份

@@ -27,7 +27,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LIB_DIRNAME = "conversations"
@@ -679,6 +679,7 @@ def library_stats(
 
     totals = {
         "conversations": len(rows),
+        "missing": len(library.missing),
         "qa": sum(r["count"] for r in rows),
         "question_chars": sum(r["question_chars"] for r in rows),
         "answer_chars": sum(r["answer_chars"] for r in rows),
@@ -747,6 +748,13 @@ def validate_library(library: "Library") -> Dict[str, Any]:
             issues.append({"severity": "warning", "file": fname,
                            "message": f"{empty_a} 组问答缺少 AI 回答"})
 
+    for fname in sorted(library.missing):
+        issues.append({
+            "severity": "warning", "file": fname,
+            "message": "对话文件缺失，元数据已保留"
+                       "（把文件放回 conversations/ 后按 F5 自动恢复）",
+        })
+
     errors = sum(1 for i in issues if i["severity"] == "error")
     return {
         "ok": errors == 0,
@@ -754,6 +762,7 @@ def validate_library(library: "Library") -> Dict[str, Any]:
         "warnings": len(issues) - errors,
         "issues": issues,
         "conversations": len(library.convs),
+        "missing": len(library.missing),
     }
 
 
@@ -764,12 +773,13 @@ def validate_library(library: "Library") -> Dict[str, Any]:
 @dataclass
 class ImportResult:
     added: List[str] = field(default_factory=list)
+    restored: List[str] = field(default_factory=list)
     duplicates: List[Tuple[str, str]] = field(default_factory=list)
     skipped: List[Tuple[str, str]] = field(default_factory=list)
 
     @property
     def total(self) -> int:
-        return len(self.added) + len(self.duplicates) + len(self.skipped)
+        return len(self.added) + len(self.restored) + len(self.duplicates) + len(self.skipped)
 
 
 # ---------------------------------------------------------------------------
@@ -786,6 +796,7 @@ class Library:
         self.file = os.path.join(self.root, LIB_FILENAME)
         self.trash_index_file = os.path.join(self.trash_dir, TRASH_INDEX_FILENAME)
         self.convs: Dict[str, Dict[str, Any]] = {}
+        self.missing: Dict[str, Dict[str, Any]] = {}
         self.trash: Dict[str, Dict[str, Any]] = {}
         self.load_error = ""
         self.recovered_from_backup = False
@@ -798,6 +809,7 @@ class Library:
         os.makedirs(self.dir, exist_ok=True)
         os.makedirs(self.trash_dir, exist_ok=True)
         self.convs = {}
+        self.missing = {}
         self.load_error = ""
         self.recovered_from_backup = False
 
@@ -813,6 +825,12 @@ class Library:
                     str(name): meta for name, meta in raw.items()
                     if isinstance(meta, dict)
                 }
+                raw_missing = data.get("missing", {})
+                if isinstance(raw_missing, dict):
+                    self.missing = {
+                        str(name): meta for name, meta in raw_missing.items()
+                        if isinstance(meta, dict)
+                    }
                 self.recovered_from_backup = recovered
                 if recovered:
                     self._skip_backup_once = True
@@ -838,6 +856,8 @@ class Library:
                 # 判断用户是否曾经手动重命名过。
                 meta["_legacy_meta"] = True
             self._sanitize_meta(meta, fname)
+        for fname, meta in self.missing.items():
+            self._sanitize_meta(meta, fname)
 
         self._load_trash_index()
         changed = self.sync(save=False)
@@ -850,7 +870,13 @@ class Library:
     def save(self, backup: bool = True) -> None:
         if backup and os.path.isfile(self.file):
             backup_file(self.file)
-        atomic_write_json(self.file, {"version": VERSION, "conversations": self.convs})
+        payload: Dict[str, Any] = {
+            "version": VERSION,
+            "conversations": self.convs,
+        }
+        if self.missing:
+            payload["missing"] = self.missing
+        atomic_write_json(self.file, payload)
 
     def _sanitize_meta(self, meta: Dict[str, Any], fname: str) -> None:
         fallback = os.path.splitext(fname)[0]
@@ -946,9 +972,18 @@ class Library:
             except OSError:
                 continue
             meta = self.convs.get(fname)
+            restored = False
+            if meta is None and fname in self.missing:
+                # 文件回来了：接回原来的元数据，保留星标/标签/自定义标题。
+                meta = self.missing.pop(fname)
+                self.convs[fname] = meta
+                restored = True
             if (meta is not None
                     and meta.get("_mtime_ns") == stat.st_mtime_ns
                     and meta.get("_size") == stat.st_size):
+                if restored:
+                    changed = True
+                    changes += 1
                 continue
             try:
                 data = load_json(path)
@@ -961,6 +996,11 @@ class Library:
                     changes += 1
                 continue
             if not is_conversation(data):
+                if restored:
+                    self.convs.pop(fname, None)
+                    self.missing[fname] = meta
+                    changed = True
+                    changes += 1
                 continue
             if meta is None:
                 self.convs[fname] = self._make_meta(fname, data, path)
@@ -972,7 +1012,17 @@ class Library:
         for fname in list(self.convs):
             path = os.path.join(self.dir, fname)
             if not os.path.isfile(path) or not fname.lower().endswith(".json"):
-                del self.convs[fname]
+                # 文件缺失时不要丢掉元数据：归档到 missing，放回文件后自动恢复。
+                meta = self.convs.pop(fname)
+                meta.pop("_invalid", None)
+                self.missing[fname] = meta
+                changed = True
+                changes += 1
+
+        for fname in list(self.missing):
+            if fname in self.convs:
+                # 同名对话已经恢复，清掉过期的 missing 记录。
+                del self.missing[fname]
                 changed = True
                 changes += 1
 
@@ -1012,6 +1062,17 @@ class Library:
             tags.update(meta.get("tags", []))
         return sorted(tags)
 
+    def missing_items(self) -> List[Dict[str, Any]]:
+        items = []
+        for fname, meta in self.missing.items():
+            items.append({
+                "file": fname,
+                "title": meta.get("title") or os.path.splitext(fname)[0],
+                "count": int(meta.get("count", 0) or 0),
+            })
+        items.sort(key=lambda item: item["title"])
+        return items
+
     def tag_counts(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
         for meta in self.convs.values():
@@ -1026,6 +1087,11 @@ class Library:
         hash_index = {
             meta.get("sha1"): fname
             for fname, meta in self.convs.items()
+            if meta.get("sha1")
+        }
+        missing_index = {
+            meta.get("sha1"): fname
+            for fname, meta in self.missing.items()
             if meta.get("sha1")
         }
         for src in paths:
@@ -1053,6 +1119,32 @@ class Library:
             if digest and digest in hash_index:
                 result.duplicates.append((display, self.convs[hash_index[digest]]["title"]))
                 continue
+            if digest and digest in missing_index:
+                # 重新导入一个“文件缺失但元数据还在”的对话：恢复标题/标签/星标。
+                old_fname = missing_index[digest]
+                dst = unique_path(self.dir, display)
+                try:
+                    shutil.copy2(src, dst)
+                except OSError as exc:
+                    try:
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                    except OSError:
+                        pass
+                    result.skipped.append((display, f"复制失败：{exc}"))
+                    continue
+                fname = os.path.basename(dst)
+                meta = self.missing.pop(old_fname, None)
+                if isinstance(meta, dict):
+                    self._sanitize_meta(meta, fname)
+                    self._refresh_meta(meta, fname, data, dst)
+                else:
+                    meta = self._make_meta(fname, data, dst, digest=digest)
+                self.convs[fname] = meta
+                self.missing.pop(fname, None)
+                hash_index[digest] = fname
+                result.restored.append(fname)
+                continue
             dst = unique_path(self.dir, display)
             try:
                 shutil.copy2(src, dst)
@@ -1066,10 +1158,11 @@ class Library:
                 continue
             fname = os.path.basename(dst)
             self.convs[fname] = self._make_meta(fname, data, dst, digest=digest)
+            self.missing.pop(fname, None)
             if digest:
                 hash_index[digest] = fname
             result.added.append(fname)
-        if result.added:
+        if result.added or result.restored:
             self.save()
         return result
 
@@ -1197,6 +1290,7 @@ class Library:
             self._sanitize_meta(meta, fname)
             self._refresh_meta(meta, fname, data, dst)
         self.convs[fname] = meta
+        self.missing.pop(fname, None)
         self.trash.pop(trash_name, None)
         self._save_trash_index()
         self.save()

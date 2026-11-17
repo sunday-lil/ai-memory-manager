@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import re
 import subprocess
@@ -797,11 +798,15 @@ class StatsWindow(tk.Toplevel):
         stats = core.library_stats(app.lib, data_loader=app._load_conv)
         totals = stats["totals"]
         minutes = totals["thinking_seconds"] / 60
+        summary_text = (
+            f"对话 {totals['conversations']} 个 · 问答 {core.fmt_count(totals['qa'])} 组 · "
+            f"正文 {core.fmt_count(totals['question_chars'] + totals['answer_chars'])} 字 · "
+            f"思考 {minutes:.1f} 分钟"
+        )
+        if totals.get("missing"):
+            summary_text += f" · 缺失 {totals['missing']} 个（元数据已保留）"
         self.summary = ttk.Label(
-            outer, font=app.fonts["title"],
-            text=(f"对话 {totals['conversations']} 个 · 问答 {core.fmt_count(totals['qa'])} 组 · "
-                  f"正文 {core.fmt_count(totals['question_chars'] + totals['answer_chars'])} 字 · "
-                  f"思考 {minutes:.1f} 分钟"),
+            outer, font=app.fonts["title"], text=summary_text,
         )
         self.summary.grid(row=0, column=0, sticky="w", pady=(0, 8))
 
@@ -926,6 +931,23 @@ class App(tk.Tk):
                 "元数据重建",
                 "library.json 无法读取，已根据 conversations/ 中的文件重建索引。\n\n"
                 + self.lib.load_error, parent=self))
+        elif self.lib.missing:
+            self._notice_after = self.after(300, self._warn_missing)
+
+    def _warn_missing(self) -> None:
+        items = self.lib.missing_items()
+        if not items:
+            return
+        preview = "\n".join("· " + item["title"] for item in items[:10])
+        if len(items) > 10:
+            preview += f"\n……另有 {len(items) - 10} 个"
+        messagebox.showwarning(
+            "对话文件缺失",
+            f"有 {len(items)} 个对话的 JSON 文件不在 conversations/ 中。\n"
+            "标题、标签、星标等元数据已经保留。把原文件放回 conversations/ 后\n"
+            "按 F5 即可自动接回，不会重新生成一份没有标签的条目。\n\n"
+            + preview,
+            parent=self)
 
     # ----- 样式 -----
 
@@ -1292,9 +1314,40 @@ class App(tk.Tk):
             self.refresh_list()
             self.update_status(f"首次启动：已自动导入 {len(result.added)} 个对话文件")
 
+    def _virtual_screen(self) -> Tuple[int, int, int, int]:
+        if sys.platform.startswith("win"):
+            try:
+                user32 = ctypes.windll.user32
+                return (
+                    int(user32.GetSystemMetrics(76)),   # SM_XVIRTUALSCREEN
+                    int(user32.GetSystemMetrics(77)),   # SM_YVIRTUALSCREEN
+                    int(user32.GetSystemMetrics(78)),   # SM_CXVIRTUALSCREEN
+                    int(user32.GetSystemMetrics(79)),   # SM_CYVIRTUALSCREEN
+                )
+            except (AttributeError, OSError):
+                pass
+        return (0, 0, self.winfo_screenwidth(), self.winfo_screenheight())
+
+    def _safe_geometry(self, geometry: Optional[str]) -> Optional[str]:
+        """把保存的窗口位置限制在当前虚拟屏幕内，避免换显示器后窗口跑到屏幕外。"""
+        if not isinstance(geometry, str):
+            return None
+        match = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", geometry)
+        if not match:
+            return None
+        width, height, x, y = (int(group) for group in match.groups())
+        vx, vy, vw, vh = self._virtual_screen()
+        if vw <= 100 or vh <= 100:
+            return None
+        width = min(width, vw)
+        height = min(height, vh)
+        x = max(vx, min(x, vx + vw - width))
+        y = max(vy, min(y, vy + vh - height))
+        return f"{width}x{height}{x:+d}{y:+d}"
+
     def _restore_view(self) -> None:
-        geometry = self.settings.get("geometry")
-        if isinstance(geometry, str) and re.match(r"^\d+x\d+([+-]\d+){2}$", geometry):
+        geometry = self._safe_geometry(self.settings.get("geometry"))
+        if geometry:
             try:
                 self.geometry(geometry)
             except tk.TclError:
@@ -1423,6 +1476,8 @@ class App(tk.Tk):
         ]
         if visible != len(self.lib.convs):
             parts.append(f"筛选中 {visible} 个")
+        if self.lib.missing:
+            parts.append(f"缺失 {len(self.lib.missing)} 个（元数据已保留）")
         if extra:
             parts.append(extra)
         self.status.config(text=" · ".join(parts))
@@ -1858,9 +1913,13 @@ class App(tk.Tk):
         result = self.lib.import_paths(paths)
         self.conv_cache.clear()
         self.refresh_list()
-        if result.added:
-            self.show_conv(result.added[0])
+        opening = result.added or result.restored
+        if opening:
+            self.show_conv(opening[0])
         lines = [f"新增 {len(result.added)} 个对话。"]
+        if result.restored:
+            lines.append(f"接回 {len(result.restored)} 个此前文件缺失的对话"
+                         "（标题/标签/星标已恢复）。")
         if result.duplicates:
             lines.append(f"\n跳过重复 {len(result.duplicates)} 个（内容已在库中）：")
             for name, existing in result.duplicates[:8]:
@@ -1874,7 +1933,9 @@ class App(tk.Tk):
             if len(result.skipped) > 8:
                 lines.append(f"  ……另有 {len(result.skipped) - 8} 个")
         messagebox.showinfo("导入完成", "\n".join(lines), parent=self)
-        self.update_status(f"导入完成：新增 {len(result.added)} 个")
+        self.update_status(
+            f"导入完成：新增 {len(result.added)} 个"
+            + (f"，接回 {len(result.restored)} 个" if result.restored else ""))
 
     # ----- 勾选与导出 -----
 

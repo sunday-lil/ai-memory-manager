@@ -124,13 +124,20 @@ def cmd_list(args, lib: Library) -> int:
                 }
                 for fname in fnames
             ],
+            "missing": lib.missing_items(),
         })
         return 0
     if not rows:
-        print("对话库是空的。可以运行 `python memory_manager.py` 打开界面导入。")
+        if lib.missing:
+            print(f"0 个可用对话；{len(lib.missing)} 个文件缺失，"
+                  "元数据已保留。把文件放回 conversations/ 后运行 --list 或按 F5。")
+        else:
+            print("对话库是空的。可以运行 `python memory_manager.py` 打开界面导入。")
         return 0
     total = sum(int(lib.convs[f].get("count", 0) or 0) for f in fnames)
-    print(f"{len(rows)} 个对话 · {total:,} 组问答 · {lib.root}\n")
+    print(f"{len(rows)} 个对话 · {total:,} 组问答 · {lib.root}"
+          + (f" · 缺失 {len(lib.missing)} 个（元数据已保留）" if lib.missing else "")
+          + "\n")
     print(_table(["标题", "问答", "日期", "文件"], rows,
                  ["left", "right", "left", "left"]))
     return 0
@@ -144,7 +151,10 @@ def cmd_stats(args, lib: Library) -> int:
     totals = stats["totals"]
     print(f"对话 {totals['conversations']} 个 · 问答 {totals['qa']:,} 组 · "
           f"正文 {totals['question_chars'] + totals['answer_chars']:,} 字 · "
-          f"思考 {totals['thinking_seconds'] / 60:.1f} 分钟\n")
+          f"思考 {totals['thinking_seconds'] / 60:.1f} 分钟"
+          + (f" · 缺失 {totals['missing']} 个（元数据已保留）"
+             if totals.get("missing") else "")
+          + "\n")
     rows = sorted(stats["rows"], key=lambda r: r["answer_chars"], reverse=True)
     table_rows = [[
         _truncate(row["title"], 28),
@@ -291,11 +301,15 @@ def cmd_import(args, lib: Library) -> int:
     if args.json:
         _print_json({
             "added": result.added,
+            "restored": result.restored,
             "duplicates": result.duplicates,
             "skipped": result.skipped,
         })
         return 0
     print(f"新增 {len(result.added)} 个对话。")
+    if result.restored:
+        print(f"接回 {len(result.restored)} 个此前文件缺失的对话"
+              "（标题/标签/星标已恢复）。")
     if result.duplicates:
         print(f"跳过重复 {len(result.duplicates)} 个：")
         for name, existing in result.duplicates:

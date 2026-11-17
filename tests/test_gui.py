@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import tempfile
 import unittest
 
@@ -96,6 +97,20 @@ class GuiSmokeTest(unittest.TestCase):
             self.assertEqual(self.app.qa_pos(), 1)
         finally:
             window.destroy()
+
+    def test_safe_geometry_clamps_offscreen(self):
+        geometry = self.app._safe_geometry("3000x2000-9000+9000")
+        self.assertIsNotNone(geometry)
+        match = re.match(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$", geometry)
+        self.assertIsNotNone(match)
+        width, height, x, y = (int(g) for g in match.groups())
+        vx, vy, vw, vh = self.app._virtual_screen()
+        self.assertLessEqual(width, vw)
+        self.assertLessEqual(height, vh)
+        self.assertGreaterEqual(x, vx)
+        self.assertGreaterEqual(y, vy)
+        self.assertLessEqual(x + width, vx + vw)
+        self.assertLessEqual(y + height, vy + vh)
 
     def test_theme_toggle_rerenders(self):
         self.app.toggle_theme()
